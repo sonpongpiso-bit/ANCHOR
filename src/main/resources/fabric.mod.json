@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "utilmod",
+  "version": "${version}",
+  "name": "Utility Mod",
+  "description": "Modular client utility mod. Currently contains: Anchor Macro.",
+  "authors": [],
+  "license": "MIT",
+  "icon": "assets/utilmod/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.utilmod.UtilityMod"
+    ]
+  },
+  "mixins": [
+    "utilmod.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.1",
+    "minecraft": "~26.1.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

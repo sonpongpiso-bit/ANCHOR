@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.utilmod.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "MinecraftAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
