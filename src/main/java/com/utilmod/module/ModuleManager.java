@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.utilmod.UtilityMod;
 import net.minecraft.client.Minecraft;
+import org.lwjgl.glfw.GLFW;
 
 import java.io.IOException;
 import java.io.Reader;
@@ -21,10 +22,6 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Registers modules, ticks the enabled ones, and persists their config in a single JSON file.
- * The file is hot-reloaded when it changes on disk, so modules can be toggled by editing it.
- */
 public final class ModuleManager {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final int RELOAD_CHECK_INTERVAL_TICKS = 20;
@@ -34,6 +31,10 @@ public final class ModuleManager {
     private final Path configPath;
     private long lastKnownModified = -1L;
     private int ticks;
+
+    /** Non-null while everything is globally OFF; holds the ids of modules to restore. */
+    private Set<String> suspended;
+    private boolean toggleKeyDown;
 
     public ModuleManager(Path configPath) {
         this.configPath = configPath;
@@ -49,7 +50,38 @@ public final class ModuleManager {
 
     public Collection<Module> getAll() { return Collections.unmodifiableCollection(modules.values()); }
 
+    /** Enables/disables all modules at once. Completely silent. */
+    public void toggleAll() {
+        if (suspended == null) {
+            suspended = new HashSet<>();
+            for (Module m : modules.values()) {
+                if (m.isEnabled()) {
+                    suspended.add(m.getId());
+                    m.setEnabled(false);
+                }
+            }
+        } else {
+            Set<String> restore = suspended;
+            suspended = null;
+            for (Module m : modules.values()) {
+                if (restore.contains(m.getId())) m.setEnabled(true);
+            }
+        }
+    }
+
+    /** Polls NumLock directly (edge-triggered). Safe to call every frame and every tick. */
+    public void pollToggleKey() {
+        long window = GLFW.glfwGetCurrentContext();
+        if (window == 0L) return;
+        boolean down = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_NUM_LOCK) != GLFW.GLFW_RELEASE;
+        if (down && !toggleKeyDown) {
+            toggleAll();
+        }
+        toggleKeyDown = down;
+    }
+
     public void tick(Minecraft mc) {
+        pollToggleKey();
         if (++ticks % RELOAD_CHECK_INTERVAL_TICKS == 0) {
             checkReload();
         }
@@ -58,7 +90,6 @@ public final class ModuleManager {
             try {
                 module.onTick(mc);
             } catch (Throwable t) {
-                // A broken module must never take the client down or affect other modules.
                 failed.add(module.getId());
                 UtilityMod.LOGGER.error("Module '{}' crashed and was disabled until the config is reloaded", module.getId(), t);
             }
@@ -94,6 +125,16 @@ public final class ModuleManager {
                     ? section.get("enabled").getAsBoolean() : m.isEnabledByDefault();
             m.setEnabled(enabled);
         }
+        if (suspended != null) {
+            // Globally OFF: keep everything off, but remember what the config wants restored.
+            suspended.clear();
+            for (Module m : modules.values()) {
+                if (m.isEnabled()) {
+                    suspended.add(m.getId());
+                    m.setEnabled(false);
+                }
+            }
+        }
         rememberModified();
     }
 
@@ -101,7 +142,7 @@ public final class ModuleManager {
         JsonObject sections = new JsonObject();
         for (Module m : modules.values()) {
             JsonObject section = new JsonObject();
-            section.addProperty("enabled", m.isEnabled());
+            section.addProperty("enabled", m.isEnabled() || (suspended != null && suspended.contains(m.getId())));
             m.saveConfig(section);
             sections.add(m.getId(), section);
         }
