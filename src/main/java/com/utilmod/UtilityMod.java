@@ -2,10 +2,14 @@ package com.utilmod;
 
 import com.utilmod.anchor.AnchorMacroModule;
 import com.utilmod.anchor.HotbarAnimation;
+import com.utilmod.hovertotem.HoverTotemModule;
 import com.utilmod.module.ModuleManager;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.resources.Identifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,13 +29,17 @@ public final class UtilityMod implements ClientModInitializer {
 
         // ---- Register modules here ----
         modules.register(new AnchorMacroModule());
-        // modules.register(new YourNextModule());
+        modules.register(new HoverTotemModule());
         // -------------------------------
 
         modules.loadConfig();
         HotbarAnimation.register();
 
-        // START tick: runs before vanilla key handling, so the macro can pre-empt vanilla right-click.
+        // Per-frame NumLock poll (draws nothing).
+        HudElementRegistry.attachElementBefore(VanillaHudElements.HOTBAR,
+                Identifier.fromNamespaceAndPath(MOD_ID, "global_toggle_poll"),
+                (graphics, deltaTracker) -> modules.pollToggleKey());
+
         ClientTickEvents.START_CLIENT_TICK.register(modules::tick);
 
         LOGGER.info("Utility Mod loaded with {} module(s)", modules.getAll().size());
