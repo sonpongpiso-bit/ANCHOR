@@ -29,7 +29,8 @@ import java.util.List;
  * While right-click is held (and an end crystal was held when it started), every tick:
  *  - break the crystal ONLY if the crosshair is on it,
  *  - place obsidian at the remembered target if it is missing (500 ms cooldown, only when actually needed),
- *  - place an end crystal ONLY if the crosshair is on the target obsidian and no crystal is there yet,
+ *  - place an end crystal ONLY if the crosshair is on the target obsidian,
+ *    immediately after a break (same tick), otherwise when no crystal is there yet,
  *  - always end the tick holding the end crystal.
  * A crystal that is already present (crosshair on it) is broken first, without placing another one.
  * All actions use the vanilla paths (useItemOn / attack), so the server sees normal packets.
@@ -40,6 +41,7 @@ public final class CrystalModule extends Module {
 
     private static final int STALE_ATTACK_TICKS = 2;   // don't re-hit a crystal that is already dying
     private static final double PLACE_RANGE_SQR = 5.0 * 5.0;
+    private static final double PICK_RANGE = 4.5;
 
     // ---- config ----
     private long obsidianCooldownMs = 500;
@@ -174,6 +176,7 @@ public final class CrystalModule extends Module {
         }
 
         // 1) Break: only when the crosshair is actually on the crystal sitting on our obsidian.
+        boolean attacked = false;
         if (entityHit != null && entityHit.getEntity() instanceof EndCrystal aimed
                 && aimed.blockPosition().equals(above)) {
             boolean stale = aimed.getId() == lastAttackedId && tickCounter - lastAttackTick < STALE_ATTACK_TICKS;
@@ -182,6 +185,7 @@ public final class CrystalModule extends Module {
                 if (swingHand) player.swing(InteractionHand.MAIN_HAND);
                 lastAttackedId = aimed.getId();
                 lastAttackTick = tickCounter;
+                attacked = true;
             }
         }
 
@@ -195,15 +199,26 @@ public final class CrystalModule extends Module {
         }
         if (!obsidianPresent) return; // keep retrying on later ticks (after the cooldown)
 
-        // 3) Crystal: only when the crosshair is on the target obsidian and no crystal is there yet.
-        if (blockHit == null || !blockHit.getBlockPos().equals(obsidianPos)) return;
-        if (!level.getBlockState(above).isAir()) return;
-        if (findCrystal(level, above) != null) return;
-        if (tickCounter - lastCrystalPlaceTick < placeSeenTicks) return;
+        // 3) Crystal: only when the crosshair is on the target obsidian.
+        //    Right after a break the crosshair is on the crystal itself, so use the real block under the
+        //    crosshair (a normal camera raycast that ignores entities) to place the next one at once.
+        BlockHitResult aim = blockHit != null ? blockHit : (attacked ? pickBlock(player) : null);
+        if (aim == null || !aim.getBlockPos().equals(obsidianPos)) return;
+        if (!attacked) {
+            if (!level.getBlockState(above).isAir()) return;
+            if (findCrystal(level, above) != null) return;
+            if (tickCounter - lastCrystalPlaceTick < placeSeenTicks) return;
+        }
 
-        useOnBlock(mc, player, inventory, crystalSlot, blockHit);
+        useOnBlock(mc, player, inventory, crystalSlot, aim);
         lastCrystalPlaceTick = tickCounter;
         pendingPlaceTick = tickCounter;
+    }
+
+    /** What a normal vanilla block raycast from the camera hits (entities ignored). */
+    private static BlockHitResult pickBlock(LocalPlayer player) {
+        HitResult result = player.pick(PICK_RANGE, 1.0F, false);
+        return result instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK ? b : null;
     }
 
     /** Selects the slot locally and right-clicks through the vanilla path (slot sync + use-item-on packets). */
