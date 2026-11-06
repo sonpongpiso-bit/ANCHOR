@@ -5,7 +5,6 @@ import com.utilmod.mixin.MinecraftAccessor;
 import com.utilmod.module.Module;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
-import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -23,42 +22,48 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayDeque;
+
 /**
  * Anchor Macro.
  *
- * Runs only while right-click is held:
- *  - Looking at an existing respawn anchor (any held item): charge (only if uncharged) -> slot 9 -> detonate.
- *  - Otherwise, once an anchor was held while right-click was down: place -> charge -> slot 9 -> detonate.
- * Everything happens in a single tick through the vanilla interaction path
- * (MultiPlayerGameMode#useItemOn), which sends the real held-slot and use-item-on packets.
+ * One sequence per right-click activation (press -> release):
+ *  - Looking at an existing respawn anchor (any held item): [charge if uncharged] -> detonate (slot 9).
+ *  - Holding an anchor and looking at a block: place -> charge -> detonate (slot 9).
+ * Actions are spaced by a configurable number of ticks (default 2 = 100 ms). Holding right-click
+ * never starts a second sequence; releasing and pressing again allows exactly one new one.
+ * All actions go through the vanilla interaction path (MultiPlayerGameMode#useItemOn).
  */
 public final class AnchorMacroModule extends Module {
     public static final String ID = "anchor_macro";
 
-    /** Ticks to ignore a position we just used, so a not-yet-updated client world cannot cause duplicate clicks. */
-    private static final int STALE_TICKS = 5;
+    private enum Step { PLACE, CHARGE, DETONATE }
 
     // ---- config ----
     private int detonateSlot = 8;           // hotbar index (config value 9 = index 8)
-    private boolean hotbarAnimation = true; // visual-only scroll to the detonate slot
+    private boolean hotbarAnimation = true; // visual-only display of every real slot switch
     private boolean swingHand = true;       // vanilla sends an arm swing per successful interaction
+    private int stepDelayTicks = 2;         // ticks between actions (2 = 100 ms)
 
     // ---- state ----
-    private boolean armed;
-    private int armedSlot = -1;
-    private BlockPos lastPos;
-    private int lastTick;
+    private boolean triggered;              // a sequence was started during this right-click hold
+    private final ArrayDeque<Step> steps = new ArrayDeque<>();
+    private int nextStepTick;
     private int tickCounter;
+    private int anchorSlot = -1;            // PLACE only
+    private BlockHitResult placeHit;        // PLACE only
+    private BlockPos anchorPos;
+    private BlockHitResult anchorHit;
+    private boolean requireAim;             // existing-anchor flow: abort if the crosshair leaves the anchor
 
     public AnchorMacroModule() {
         super(ID, "Anchor Macro",
-                "Place, charge and detonate respawn anchors while holding right-click.", true);
+                "Place, charge and detonate a respawn anchor once per right-click.", true);
     }
 
     @Override
     protected void onDisable() {
-        disarm();
-        lastPos = null;
+        reset();
     }
 
     @Override
@@ -73,6 +78,9 @@ public final class AnchorMacroModule extends Module {
         if (section.has("swingHand") && section.get("swingHand").isJsonPrimitive()) {
             swingHand = section.get("swingHand").getAsBoolean();
         }
+        if (section.has("stepDelayTicks") && section.get("stepDelayTicks").isJsonPrimitive()) {
+            stepDelayTicks = Math.max(1, Math.min(10, section.get("stepDelayTicks").getAsInt()));
+        }
     }
 
     @Override
@@ -80,6 +88,7 @@ public final class AnchorMacroModule extends Module {
         section.addProperty("detonateSlot", detonateSlot + 1);
         section.addProperty("hotbarAnimation", hotbarAnimation);
         section.addProperty("swingHand", swingHand);
+        section.addProperty("stepDelayTicks", stepDelayTicks);
     }
 
     @Override
@@ -88,17 +97,22 @@ public final class AnchorMacroModule extends Module {
 
         LocalPlayer player = mc.player;
         ClientLevel level = mc.level;
-        MultiPlayerGameMode gameMode = mc.gameMode;
-        if (player == null || level == null || gameMode == null || mc.screen != null
+        if (player == null || level == null || mc.gameMode == null || mc.screen != null
                 || !mc.options.keyUse.isDown()) {
-            disarm(); // right-click released (or no longer valid): stop immediately
+            reset(); // right-click released (or no longer valid): stop immediately, allow a new activation
             return;
         }
 
         Inventory inventory = player.getInventory();
-        if (player.getMainHandItem().is(Items.RESPAWN_ANCHOR)) {
-            armed = true;
-            armedSlot = inventory.getSelectedSlot();
+
+        if (triggered) {
+            // This hold already used its one sequence: keep vanilla from placing/clicking more,
+            // and keep running the remaining steps of the current sequence.
+            suppressVanillaUse(mc);
+            if (!steps.isEmpty() && tickCounter >= nextStepTick) {
+                runNextStep(mc, player, level, inventory);
+            }
+            return;
         }
 
         // Sneaking turns block interactions into item placement, which would break charging.
@@ -111,64 +125,110 @@ public final class AnchorMacroModule extends Module {
 
         if (state.is(Blocks.RESPAWN_ANCHOR)) {
             // Existing anchors always take priority over placement.
-            handleExistingAnchor(mc, player, inventory, state, pos, hit);
-        } else if (armed) {
-            handlePlacement(mc, player, level, inventory, hit);
+            startExistingAnchor(mc, player, level, inventory, state, pos, hit);
+        } else if (player.getMainHandItem().is(Items.RESPAWN_ANCHOR)) {
+            startPlacement(mc, player, level, inventory, hit);
         }
     }
 
-    private void handleExistingAnchor(Minecraft mc, LocalPlayer player, Inventory inventory,
-                                      BlockState state, BlockPos pos, BlockHitResult hit) {
-        if (isStale(pos)) {
-            suppressVanillaUse(mc);
-            return;
-        }
+    private void startExistingAnchor(Minecraft mc, LocalPlayer player, ClientLevel level, Inventory inventory,
+                                     BlockState state, BlockPos pos, BlockHitResult hit) {
         boolean needsCharge = state.getValue(RespawnAnchorBlock.CHARGE) == 0;
-        int glowstoneSlot = -1;
-        if (needsCharge) {
-            glowstoneSlot = findInHotbar(inventory, Items.GLOWSTONE);
-            if (glowstoneSlot < 0) return; // cannot charge: leave vanilla behaviour alone
-        }
+        if (needsCharge && findInHotbar(inventory, Items.GLOWSTONE) < 0) return; // cannot charge: leave vanilla alone
         if (!detonatorUsable(inventory)) return;
 
-        suppressVanillaUse(mc);
-        if (needsCharge) {
-            useOnBlock(mc, player, inventory, glowstoneSlot, hit);
-        }
-        useOnBlock(mc, player, inventory, detonateSlot, hit);
-        markUsed(pos);
+        steps.clear();
+        if (needsCharge) steps.add(Step.CHARGE);
+        steps.add(Step.DETONATE);
+        anchorPos = pos.immutable();
+        anchorHit = hit;
+        placeHit = null;
+        anchorSlot = -1;
+        requireAim = true;
+        begin(mc, player, level, inventory);
     }
 
-    private void handlePlacement(Minecraft mc, LocalPlayer player, ClientLevel level,
-                                 Inventory inventory, BlockHitResult hit) {
-        int anchorSlot = resolveAnchorSlot(inventory);
-        if (anchorSlot < 0) {
-            disarm();
-            return;
-        }
-        int glowstoneSlot = findInHotbar(inventory, Items.GLOWSTONE);
-        if (glowstoneSlot < 0 || !detonatorUsable(inventory)) return;
+    private void startPlacement(Minecraft mc, LocalPlayer player, ClientLevel level, Inventory inventory,
+                                BlockHitResult hit) {
+        int slot = inventory.getSelectedSlot();
+        if (findInHotbar(inventory, Items.GLOWSTONE) < 0 || !detonatorUsable(inventory)) return;
 
-        ItemStack anchorStack = inventory.getItem(anchorSlot);
+        ItemStack anchorStack = inventory.getItem(slot);
         BlockPlaceContext context = new BlockPlaceContext(player, InteractionHand.MAIN_HAND, anchorStack, hit);
         if (!context.canPlace()) return;
-        BlockPos anchorPos = context.getClickedPos();
+        BlockPos placedPos = context.getClickedPos();
 
+        // Click the anchor on the same side we place against, like a real player would.
+        Direction face = hit.getDirection();
+        Vec3 location = Vec3.atCenterOf(placedPos)
+                .add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
+
+        steps.clear();
+        steps.add(Step.PLACE);
+        steps.add(Step.CHARGE);
+        steps.add(Step.DETONATE);
+        anchorSlot = slot;
+        placeHit = hit;
+        anchorPos = placedPos.immutable();
+        anchorHit = new BlockHitResult(location, face, anchorPos, false);
+        requireAim = false;
+        begin(mc, player, level, inventory);
+    }
+
+    private void begin(Minecraft mc, LocalPlayer player, ClientLevel level, Inventory inventory) {
+        triggered = true; // exactly one sequence for this right-click hold
         suppressVanillaUse(mc);
+        runNextStep(mc, player, level, inventory);
+    }
 
-        useOnBlock(mc, player, inventory, anchorSlot, hit);
-        if (!level.getBlockState(anchorPos).is(Blocks.RESPAWN_ANCHOR)) {
-            return; // placement was rejected locally (e.g. entity in the way): do not send further clicks
+    private void runNextStep(Minecraft mc, LocalPlayer player, ClientLevel level, Inventory inventory) {
+        Step step = steps.pollFirst();
+        if (step == null) return;
+
+        // Validity checks before every action; any failure ends this sequence (no retry within the hold).
+        if (player.isShiftKeyDown()) { steps.clear(); return; }
+        if (step != Step.PLACE) {
+            if (!level.getBlockState(anchorPos).is(Blocks.RESPAWN_ANCHOR)) { steps.clear(); return; }
+            if (requireAim && !(mc.hitResult instanceof BlockHitResult aim
+                    && aim.getType() == HitResult.Type.BLOCK && aim.getBlockPos().equals(anchorPos))) {
+                steps.clear();
+                return;
+            }
         }
 
-        // Click the anchor on the same side we placed against, like a real player would.
-        Direction face = hit.getDirection();
-        Vec3 location = Vec3.atCenterOf(anchorPos).add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
-        BlockHitResult anchorHit = new BlockHitResult(location, face, anchorPos, false);
+        boolean ok = true;
+        switch (step) {
+            case PLACE -> {
+                if (!inventory.getItem(anchorSlot).is(Items.RESPAWN_ANCHOR)) {
+                    ok = false;
+                } else {
+                    useOnBlock(mc, player, inventory, anchorSlot, placeHit);
+                    // Local rejection (e.g. entity in the way): do not send any further clicks.
+                    ok = level.getBlockState(anchorPos).is(Blocks.RESPAWN_ANCHOR);
+                }
+            }
+            case CHARGE -> {
+                int glowstoneSlot = findInHotbar(inventory, Items.GLOWSTONE);
+                if (glowstoneSlot < 0) {
+                    ok = false;
+                } else {
+                    useOnBlock(mc, player, inventory, glowstoneSlot, anchorHit);
+                }
+            }
+            case DETONATE -> {
+                if (!detonatorUsable(inventory)) {
+                    ok = false;
+                } else {
+                    useOnBlock(mc, player, inventory, detonateSlot, anchorHit);
+                }
+            }
+        }
 
-        useOnBlock(mc, player, inventory, glowstoneSlot, anchorHit);
-        useOnBlock(mc, player, inventory, detonateSlot, anchorHit);
-        markUsed(anchorPos);
+        if (!ok) {
+            steps.clear();
+            return;
+        }
+        nextStepTick = tickCounter + stepDelayTicks;
     }
 
     /**
@@ -177,16 +237,19 @@ public final class AnchorMacroModule extends Module {
      * sends the use-item-on packet, so the server sees the exact vanilla sequence.
      */
     private void useOnBlock(Minecraft mc, LocalPlayer player, Inventory inventory, int slot, BlockHitResult hit) {
-        int previous = inventory.getSelectedSlot();
-        if (previous != slot) {
-            inventory.setSelectedSlot(slot);
-            if (hotbarAnimation && slot == detonateSlot) {
-                HotbarAnimation.begin(previous, slot);
-            }
-        }
+        selectSlot(inventory, slot);
         InteractionResult result = mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
         if (swingHand && result.consumesAction()) {
             player.swing(InteractionHand.MAIN_HAND);
+        }
+    }
+
+    /** The single place where this module changes the real slot; every change is recorded for the display. */
+    private void selectSlot(Inventory inventory, int slot) {
+        if (inventory.getSelectedSlot() == slot) return;
+        inventory.setSelectedSlot(slot);
+        if (hotbarAnimation) {
+            HotbarAnimation.recordSwitch(slot);
         }
     }
 
@@ -203,15 +266,6 @@ public final class AnchorMacroModule extends Module {
         return !inventory.getItem(detonateSlot).is(Items.GLOWSTONE);
     }
 
-    private int resolveAnchorSlot(Inventory inventory) {
-        if (armedSlot >= 0 && inventory.getItem(armedSlot).is(Items.RESPAWN_ANCHOR)) {
-            return armedSlot;
-        }
-        int found = findInHotbar(inventory, Items.RESPAWN_ANCHOR);
-        armedSlot = found;
-        return found;
-    }
-
     private static int findInHotbar(Inventory inventory, Item item) {
         for (int i = 0; i < 9; i++) {
             if (inventory.getItem(i).is(item)) return i;
@@ -219,17 +273,13 @@ public final class AnchorMacroModule extends Module {
         return -1;
     }
 
-    private boolean isStale(BlockPos pos) {
-        return lastPos != null && lastPos.equals(pos) && tickCounter - lastTick < STALE_TICKS;
-    }
-
-    private void markUsed(BlockPos pos) {
-        lastPos = pos.immutable();
-        lastTick = tickCounter;
-    }
-
-    private void disarm() {
-        armed = false;
-        armedSlot = -1;
+    private void reset() {
+        triggered = false;
+        steps.clear();
+        anchorSlot = -1;
+        placeHit = null;
+        anchorPos = null;
+        anchorHit = null;
+        requireAim = false;
     }
 }
