@@ -45,7 +45,7 @@ public final class SafeAnchorModule extends Module {
 
     // ---- config ----
     private int keyCode = GLFW.GLFW_KEY_GRAVE_ACCENT; // the ~ key
-    private int stepDelayTicks = 3;                    // 3 ticks = 150 ms between actions
+    private int stepDelayTicks = 2;                    // 3 ticks = 150 ms between actions
     private int detonateSlot = 8;                      // hotbar index (config value 9 = index 8)
     private boolean hotbarAnimation = true;
     private boolean swingHand = true;
