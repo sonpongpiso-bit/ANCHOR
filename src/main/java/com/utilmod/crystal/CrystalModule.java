@@ -32,6 +32,7 @@ import java.util.List;
  *  - place an end crystal ONLY if the crosshair is on the target obsidian (using the real crosshair hit),
  *  - always end the tick holding the end crystal.
  * All actions use the vanilla paths (useItemOn / attack), so the server sees normal packets.
+ * Every real slot switch is recorded for the hotbar display, in order.
  */
 public final class CrystalModule extends Module {
     public static final String ID = "crystal";
@@ -54,7 +55,6 @@ public final class CrystalModule extends Module {
     private int lastCrystalPlaceTick = -100;
     private int lastAttackedId = -1;
     private int lastAttackTick = -100;
-    private int returnFromSlot = -1;     // slot we came back from, for the visual scroll back
     // Deliberately NOT reset on release/target change: the cooldown only measures real obsidian attempts.
     private long lastObsidianNanos = System.nanoTime() - 3_600_000_000_000L;
 
@@ -107,14 +107,6 @@ public final class CrystalModule extends Module {
         }
         if (!armed) return;
 
-        // Visual only: scroll the hotbar back from the obsidian slot after the previous tick's switch.
-        if (returnFromSlot != -1) {
-            if (hotbarAnimation) {
-                HotbarAnimation.begin(returnFromSlot, inventory.getSelectedSlot());
-            }
-            returnFromSlot = -1;
-        }
-
         int crystalSlot = resolveCrystalSlot(inventory);
         if (crystalSlot < 0) {
             release();
@@ -132,11 +124,7 @@ public final class CrystalModule extends Module {
         runSequence(mc, player, level, inventory, crystalSlot, obsidianSlot, blockHit, entityHit);
 
         // Always finish the tick holding the end crystal (covers failed/skipped obsidian attempts).
-        int current = inventory.getSelectedSlot();
-        if (current != crystalSlot) {
-            inventory.setSelectedSlot(crystalSlot);
-            returnFromSlot = current;
-        }
+        selectSlot(inventory, crystalSlot);
     }
 
     /** Remembers what we are working on. Only ever updated from what the crosshair is really on. */
@@ -201,16 +189,19 @@ public final class CrystalModule extends Module {
 
     /** Selects the slot locally and right-clicks through the vanilla path (slot sync + use-item-on packets). */
     private void useOnBlock(Minecraft mc, LocalPlayer player, Inventory inventory, int slot, BlockHitResult hit) {
-        int previous = inventory.getSelectedSlot();
-        if (previous != slot) {
-            inventory.setSelectedSlot(slot);
-            if (hotbarAnimation) {
-                HotbarAnimation.begin(previous, slot);
-            }
-        }
+        selectSlot(inventory, slot);
         InteractionResult result = mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
         if (swingHand && result.consumesAction()) {
             player.swing(InteractionHand.MAIN_HAND);
+        }
+    }
+
+    /** The single place where this module changes the real slot; every change is recorded for the display. */
+    private void selectSlot(Inventory inventory, int slot) {
+        if (inventory.getSelectedSlot() == slot) return;
+        inventory.setSelectedSlot(slot);
+        if (hotbarAnimation) {
+            HotbarAnimation.recordSwitch(slot);
         }
     }
 
@@ -251,6 +242,5 @@ public final class CrystalModule extends Module {
         armedSlot = -1;
         targetPos = null;
         supportHit = null;
-        returnFromSlot = -1;
     }
 }
