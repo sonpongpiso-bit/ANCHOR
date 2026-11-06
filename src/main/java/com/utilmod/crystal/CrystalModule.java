@@ -29,16 +29,16 @@ import java.util.List;
  * While right-click is held (and an end crystal was held when it started), every tick:
  *  - break the crystal ONLY if the crosshair is on it,
  *  - place obsidian at the remembered target if it is missing (500 ms cooldown, only when actually needed),
- *  - place an end crystal ONLY if the crosshair is on the target obsidian (using the real crosshair hit),
+ *  - place an end crystal ONLY if the crosshair is on the target obsidian and no crystal is there yet,
  *  - always end the tick holding the end crystal.
+ * A crystal that is already present (crosshair on it) is broken first, without placing another one.
  * All actions use the vanilla paths (useItemOn / attack), so the server sees normal packets.
  * Every real slot switch is recorded for the hotbar display, in order.
  */
 public final class CrystalModule extends Module {
     public static final String ID = "crystal";
 
-    private static final int STALE_ATTACK_TICKS = 4;   // don't re-hit a crystal that is already dying
-    private static final int CRYSTAL_RETRY_TICKS = 2;  // wait for a placed crystal to appear before retrying
+    private static final int STALE_ATTACK_TICKS = 2;   // don't re-hit a crystal that is already dying
     private static final double PLACE_RANGE_SQR = 5.0 * 5.0;
 
     // ---- config ----
@@ -55,6 +55,8 @@ public final class CrystalModule extends Module {
     private int lastCrystalPlaceTick = -100;
     private int lastAttackedId = -1;
     private int lastAttackTick = -100;
+    private int placeSeenTicks = 2;      // measured delay between placing a crystal and seeing it (adaptive)
+    private int pendingPlaceTick = -1;
     // Deliberately NOT reset on release/target change: the cooldown only measures real obsidian attempts.
     private long lastObsidianNanos = System.nanoTime() - 3_600_000_000_000L;
 
@@ -117,7 +119,7 @@ public final class CrystalModule extends Module {
         BlockHitResult blockHit = mc.hitResult instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK ? b : null;
         EntityHitResult entityHit = mc.hitResult instanceof EntityHitResult e ? e : null;
 
-        updateTarget(player, level, inventory, blockHit, obsidianSlot);
+        updateTarget(player, level, inventory, blockHit, entityHit, obsidianSlot);
         if (targetPos == null) return; // nothing to work on yet: leave vanilla behaviour alone
 
         suppressVanillaUse(mc);
@@ -129,7 +131,16 @@ public final class CrystalModule extends Module {
 
     /** Remembers what we are working on. Only ever updated from what the crosshair is really on. */
     private void updateTarget(LocalPlayer player, ClientLevel level, Inventory inventory,
-                              BlockHitResult hit, int obsidianSlot) {
+                              BlockHitResult hit, EntityHitResult entityHit, int obsidianSlot) {
+        // A crystal that is already there (crosshair on it): target the block below it, so it gets broken.
+        if (entityHit != null && entityHit.getEntity() instanceof EndCrystal aimedCrystal) {
+            BlockPos below = aimedCrystal.blockPosition().below();
+            if (!below.equals(targetPos)) {
+                targetPos = below.immutable();
+                supportHit = null;
+            }
+            return;
+        }
         if (hit == null) return;
 
         BlockPos hitPos = hit.getBlockPos();
@@ -155,6 +166,13 @@ public final class CrystalModule extends Module {
         BlockPos obsidianPos = targetPos;
         BlockPos above = obsidianPos.above();
 
+        // Adaptive: measure how long a placed crystal takes to show up on this client.
+        if (pendingPlaceTick >= 0 && tickCounter - pendingPlaceTick > 6) pendingPlaceTick = -1;
+        if (pendingPlaceTick >= 0 && findCrystal(level, above) != null) {
+            placeSeenTicks = Math.max(1, Math.min(4, tickCounter - pendingPlaceTick));
+            pendingPlaceTick = -1;
+        }
+
         // 1) Break: only when the crosshair is actually on the crystal sitting on our obsidian.
         if (entityHit != null && entityHit.getEntity() instanceof EndCrystal aimed
                 && aimed.blockPosition().equals(above)) {
@@ -177,14 +195,15 @@ public final class CrystalModule extends Module {
         }
         if (!obsidianPresent) return; // keep retrying on later ticks (after the cooldown)
 
-        // 3) Crystal: only when the crosshair is on the target obsidian, using the real crosshair hit.
+        // 3) Crystal: only when the crosshair is on the target obsidian and no crystal is there yet.
         if (blockHit == null || !blockHit.getBlockPos().equals(obsidianPos)) return;
         if (!level.getBlockState(above).isAir()) return;
         if (findCrystal(level, above) != null) return;
-        if (tickCounter - lastCrystalPlaceTick < CRYSTAL_RETRY_TICKS) return;
+        if (tickCounter - lastCrystalPlaceTick < placeSeenTicks) return;
 
         useOnBlock(mc, player, inventory, crystalSlot, blockHit);
         lastCrystalPlaceTick = tickCounter;
+        pendingPlaceTick = tickCounter;
     }
 
     /** Selects the slot locally and right-clicks through the vanilla path (slot sync + use-item-on packets). */
@@ -198,10 +217,11 @@ public final class CrystalModule extends Module {
 
     /** The single place where this module changes the real slot; every change is recorded for the display. */
     private void selectSlot(Inventory inventory, int slot) {
-        if (inventory.getSelectedSlot() == slot) return;
+        int previous = inventory.getSelectedSlot();
+        if (previous == slot) return;
         inventory.setSelectedSlot(slot);
         if (hotbarAnimation) {
-            HotbarAnimation.recordSwitch(slot);
+            HotbarAnimation.recordSwitch(previous, slot);
         }
     }
 
@@ -242,5 +262,6 @@ public final class CrystalModule extends Module {
         armedSlot = -1;
         targetPos = null;
         supportHit = null;
+        pendingPlaceTick = -1;
     }
 }
