@@ -30,7 +30,7 @@ import java.util.ArrayDeque;
  * One sequence per right-click activation (press -> release):
  *  - Looking at an existing respawn anchor (any held item): [charge if uncharged] -> detonate (slot 9).
  *  - Holding an anchor and looking at a block: place -> charge -> detonate (slot 9).
- * Actions are spaced by a configurable number of ticks (default 2 = 100 ms). Holding right-click
+ * Actions are spaced by a configurable number of ticks (default 1 = 50 ms). Holding right-click
  * never starts a second sequence; releasing and pressing again allows exactly one new one.
  * All actions go through the vanilla interaction path (MultiPlayerGameMode#useItemOn).
  */
@@ -43,7 +43,8 @@ public final class AnchorMacroModule extends Module {
     private int detonateSlot = 8;           // hotbar index (config value 9 = index 8)
     private boolean hotbarAnimation = true; // visual-only display of every real slot switch
     private boolean swingHand = true;       // vanilla sends an arm swing per successful interaction
-    private int stepDelayTicks = 2;         // ticks between actions (2 = 100 ms)
+    private int placeToChargeTicks = 1;     // ticks between placing and charging (1 = 50 ms)
+    private int chargeToDetonateTicks = 1;  // ticks between charging and detonating
 
     // ---- state ----
     private boolean triggered;              // a sequence was started during this right-click hold
@@ -78,8 +79,11 @@ public final class AnchorMacroModule extends Module {
         if (section.has("swingHand") && section.get("swingHand").isJsonPrimitive()) {
             swingHand = section.get("swingHand").getAsBoolean();
         }
-        if (section.has("stepDelayTicks") && section.get("stepDelayTicks").isJsonPrimitive()) {
-            stepDelayTicks = Math.max(1, Math.min(10, section.get("stepDelayTicks").getAsInt()));
+        if (section.has("placeToChargeTicks") && section.get("placeToChargeTicks").isJsonPrimitive()) {
+            placeToChargeTicks = Math.max(1, Math.min(10, section.get("placeToChargeTicks").getAsInt()));
+        }
+        if (section.has("chargeToDetonateTicks") && section.get("chargeToDetonateTicks").isJsonPrimitive()) {
+            chargeToDetonateTicks = Math.max(1, Math.min(10, section.get("chargeToDetonateTicks").getAsInt()));
         }
     }
 
@@ -88,7 +92,8 @@ public final class AnchorMacroModule extends Module {
         section.addProperty("detonateSlot", detonateSlot + 1);
         section.addProperty("hotbarAnimation", hotbarAnimation);
         section.addProperty("swingHand", swingHand);
-        section.addProperty("stepDelayTicks", stepDelayTicks);
+        section.addProperty("placeToChargeTicks", placeToChargeTicks);
+        section.addProperty("chargeToDetonateTicks", chargeToDetonateTicks);
     }
 
     @Override
@@ -228,7 +233,7 @@ public final class AnchorMacroModule extends Module {
             steps.clear();
             return;
         }
-        nextStepTick = tickCounter + stepDelayTicks;
+        nextStepTick = tickCounter + (step == Step.PLACE ? placeToChargeTicks : chargeToDetonateTicks);
     }
 
     /**
@@ -246,10 +251,11 @@ public final class AnchorMacroModule extends Module {
 
     /** The single place where this module changes the real slot; every change is recorded for the display. */
     private void selectSlot(Inventory inventory, int slot) {
-        if (inventory.getSelectedSlot() == slot) return;
+        int previous = inventory.getSelectedSlot();
+        if (previous == slot) return;
         inventory.setSelectedSlot(slot);
         if (hotbarAnimation) {
-            HotbarAnimation.recordSwitch(slot);
+            HotbarAnimation.recordSwitch(previous, slot);
         }
     }
 
