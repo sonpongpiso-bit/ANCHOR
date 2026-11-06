@@ -2,9 +2,10 @@ package com.utilmod;
 
 import com.utilmod.anchor.AnchorMacroModule;
 import com.utilmod.anchor.HotbarAnimation;
-import com.utilmod.hovertotem.HoverTotemModule;
 import com.utilmod.crystal.CrystalModule;
+import com.utilmod.hovertotem.HoverTotemModule;
 import com.utilmod.module.ModuleManager;
+import com.utilmod.safeanchor.SafeAnchorModule;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
@@ -31,7 +32,8 @@ public final class UtilityMod implements ClientModInitializer {
         // ---- Register modules here ----
         modules.register(new AnchorMacroModule());
         modules.register(new HoverTotemModule());
-                modules.register(new CrystalModule());
+        modules.register(new CrystalModule());
+        modules.register(new SafeAnchorModule());
         // -------------------------------
 
         modules.loadConfig();
