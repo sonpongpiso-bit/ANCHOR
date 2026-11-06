@@ -29,9 +29,9 @@ import java.util.List;
  * While right-click is held (and an end crystal was held when it started), every tick:
  *  - break the crystal ONLY if the crosshair is on it,
  *  - place obsidian at the remembered target if it is missing (500 ms cooldown, only when actually needed),
- *  - place an end crystal ONLY if the crosshair is on the target obsidian,
- *    immediately after a break (same tick), otherwise when no crystal is there yet,
+ *  - place an end crystal ONLY if the crosshair is on the target obsidian and no crystal is there yet,
  *  - always end the tick holding the end crystal.
+ * Crystal actions (break / place) are spaced by actionDelayTicks (default 2 = 100 ms).
  * A crystal that is already present (crosshair on it) is broken first, without placing another one.
  * All actions use the vanilla paths (useItemOn / attack), so the server sees normal packets.
  * Every real slot switch is recorded for the hotbar display, in order.
@@ -39,12 +39,11 @@ import java.util.List;
 public final class CrystalModule extends Module {
     public static final String ID = "crystal";
 
-    private static final int STALE_ATTACK_TICKS = 2;   // don't re-hit a crystal that is already dying
     private static final double PLACE_RANGE_SQR = 5.0 * 5.0;
-    private static final double PICK_RANGE = 4.5;
 
     // ---- config ----
     private long obsidianCooldownMs = 500;
+    private int actionDelayTicks = 2;    // gap between crystal actions (break / place), 2 = 100 ms
     private boolean swingHand = true;
     private boolean hotbarAnimation = true;
 
@@ -54,7 +53,7 @@ public final class CrystalModule extends Module {
     private BlockPos targetPos;          // where the obsidian is / should be
     private BlockHitResult supportHit;   // real crosshair hit used to place obsidian there (null for existing obsidian)
     private int tickCounter;
-    private int lastCrystalPlaceTick = -100;
+    private int lastActionTick = -100;   // last crystal break or place
     private int lastAttackedId = -1;
     private int lastAttackTick = -100;
     private int placeSeenTicks = 2;      // measured delay between placing a crystal and seeing it (adaptive)
@@ -77,6 +76,9 @@ public final class CrystalModule extends Module {
         if (section.has("obsidianCooldownMs") && section.get("obsidianCooldownMs").isJsonPrimitive()) {
             obsidianCooldownMs = Math.max(0L, section.get("obsidianCooldownMs").getAsLong());
         }
+        if (section.has("actionDelayTicks") && section.get("actionDelayTicks").isJsonPrimitive()) {
+            actionDelayTicks = Math.max(1, Math.min(10, section.get("actionDelayTicks").getAsInt()));
+        }
         if (section.has("swingHand") && section.get("swingHand").isJsonPrimitive()) {
             swingHand = section.get("swingHand").getAsBoolean();
         }
@@ -88,6 +90,7 @@ public final class CrystalModule extends Module {
     @Override
     public void saveConfig(JsonObject section) {
         section.addProperty("obsidianCooldownMs", obsidianCooldownMs);
+        section.addProperty("actionDelayTicks", actionDelayTicks);
         section.addProperty("swingHand", swingHand);
         section.addProperty("hotbarAnimation", hotbarAnimation);
     }
@@ -167,6 +170,7 @@ public final class CrystalModule extends Module {
                              int crystalSlot, int obsidianSlot, BlockHitResult blockHit, EntityHitResult entityHit) {
         BlockPos obsidianPos = targetPos;
         BlockPos above = obsidianPos.above();
+        boolean actionReady = tickCounter - lastActionTick >= actionDelayTicks;
 
         // Adaptive: measure how long a placed crystal takes to show up on this client.
         if (pendingPlaceTick >= 0 && tickCounter - pendingPlaceTick > 6) pendingPlaceTick = -1;
@@ -176,16 +180,16 @@ public final class CrystalModule extends Module {
         }
 
         // 1) Break: only when the crosshair is actually on the crystal sitting on our obsidian.
-        boolean attacked = false;
-        if (entityHit != null && entityHit.getEntity() instanceof EndCrystal aimed
+        if (actionReady && entityHit != null && entityHit.getEntity() instanceof EndCrystal aimed
                 && aimed.blockPosition().equals(above)) {
-            boolean stale = aimed.getId() == lastAttackedId && tickCounter - lastAttackTick < STALE_ATTACK_TICKS;
+            boolean stale = aimed.getId() == lastAttackedId && tickCounter - lastAttackTick < actionDelayTicks;
             if (!stale) {
                 mc.gameMode.attack(player, aimed);
                 if (swingHand) player.swing(InteractionHand.MAIN_HAND);
                 lastAttackedId = aimed.getId();
                 lastAttackTick = tickCounter;
-                attacked = true;
+                lastActionTick = tickCounter;
+                return; // one crystal action per gap
             }
         }
 
@@ -199,26 +203,16 @@ public final class CrystalModule extends Module {
         }
         if (!obsidianPresent) return; // keep retrying on later ticks (after the cooldown)
 
-        // 3) Crystal: only when the crosshair is on the target obsidian.
-        //    Right after a break the crosshair is on the crystal itself, so use the real block under the
-        //    crosshair (a normal camera raycast that ignores entities) to place the next one at once.
-        BlockHitResult aim = blockHit != null ? blockHit : (attacked ? pickBlock(player) : null);
-        if (aim == null || !aim.getBlockPos().equals(obsidianPos)) return;
-        if (!attacked) {
-            if (!level.getBlockState(above).isAir()) return;
-            if (findCrystal(level, above) != null) return;
-            if (tickCounter - lastCrystalPlaceTick < placeSeenTicks) return;
-        }
+        // 3) Crystal: only when the crosshair is on the target obsidian and no crystal is there yet.
+        if (!actionReady) return;
+        if (blockHit == null || !blockHit.getBlockPos().equals(obsidianPos)) return;
+        if (!level.getBlockState(above).isAir()) return;
+        if (findCrystal(level, above) != null) return;
+        if (tickCounter - lastActionTick < placeSeenTicks) return;
 
-        useOnBlock(mc, player, inventory, crystalSlot, aim);
-        lastCrystalPlaceTick = tickCounter;
+        useOnBlock(mc, player, inventory, crystalSlot, blockHit);
+        lastActionTick = tickCounter;
         pendingPlaceTick = tickCounter;
-    }
-
-    /** What a normal vanilla block raycast from the camera hits (entities ignored). */
-    private static BlockHitResult pickBlock(LocalPlayer player) {
-        HitResult result = player.pick(PICK_RANGE, 1.0F, false);
-        return result instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK ? b : null;
     }
 
     /** Selects the slot locally and right-clicks through the vanilla path (slot sync + use-item-on packets). */
