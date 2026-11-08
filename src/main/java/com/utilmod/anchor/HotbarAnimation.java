@@ -10,19 +10,23 @@ import java.util.ArrayDeque;
 
 /**
  * Purely visual hotbar display. Real slot changes happen instantly and packets are never delayed.
- * Every real switch (from -> to) is queued and replayed as manual-scroll steps through the slots in
- * between. The highlight is only swapped while the vanilla hotbar is drawn, then restored immediately.
+ *
+ * Every real switch (from -> to) recorded by a module is replayed in order, one displayed slot per step,
+ * jumping straight to the slots the module actually used. No in-between slots are ever shown.
+ * The highlight is only swapped while the vanilla hotbar is drawn, then restored immediately, so the
+ * displayed slot always ends on the real selected slot.
  */
 public final class HotbarAnimation {
-    /** Time per slot step, like a quick wheel scroll. */
-    private static final long STEP_NANOS = 16_000_000L;
-    /** Above this many pending steps the replay speeds up (never skips) so it stays in sync. */
+    /** Minimum time each displayed slot stays visible (about one frame at 50 fps). */
+    private static final long STEP_NANOS = 20_000_000L;
+    /** Above this many pending entries the replay speeds up (never skips) so it stays in sync. */
     private static final int FAST_BACKLOG = 6;
     private static final int MAX_QUEUE = 64;
 
     private static final ArrayDeque<Integer> pending = new ArrayDeque<>();
-    private static int visual = -1;   // slot currently displayed, -1 = not animating (vanilla shows the real slot)
-    private static int lastEnd = -1;  // slot the queued steps end on
+    private static boolean active;
+    private static int visual = -1;   // slot currently displayed
+    private static int lastEnd = -1;  // slot the queued entries end on
     private static long lastStep;
     private static int swappedReal = -1;
 
@@ -40,19 +44,17 @@ public final class HotbarAnimation {
     /** Records one real slot switch, in order. Costs nothing and never touches packets. */
     public static void recordSwitch(int fromSlot, int toSlot) {
         if (fromSlot == toSlot) return;
-        if (visual == -1) {
-            visual = fromSlot;
-            lastEnd = fromSlot;
-            lastStep = System.nanoTime();
+        if (!active) {
+            active = true;
+            lastEnd = -1;
+            visual = -1;
+            pending.clear();
+            lastStep = System.nanoTime() - STEP_NANOS; // first entry shows on the very next frame
         }
-        int forward = Math.floorMod(toSlot - lastEnd, 9);
-        int dir = forward <= 4 ? 1 : -1;
-        int steps = forward <= 4 ? forward : 9 - forward;
-        int s = lastEnd;
-        for (int i = 0; i < steps; i++) {
-            s = Math.floorMod(s + dir, 9);
-            pending.addLast(s);
+        if (lastEnd != fromSlot) {
+            pending.addLast(fromSlot); // where the highlight was before this switch
         }
+        pending.addLast(toSlot);
         lastEnd = toSlot;
         while (pending.size() > MAX_QUEUE) pending.pollFirst();
     }
@@ -64,33 +66,32 @@ public final class HotbarAnimation {
 
     private static void reset() {
         pending.clear();
+        active = false;
         visual = -1;
         lastEnd = -1;
     }
 
     private static void beforeHotbar() {
-        if (visual == -1) return;
+        if (!active) return;
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null) {
             reset();
             return;
         }
+        if (pending.isEmpty()) {
+            reset(); // everything was shown; the last entry is the real slot, so vanilla draws the same one
+            return;
+        }
 
-        long now = System.nanoTime();
         int backlog = pending.size();
         long interval = backlog > FAST_BACKLOG
-                ? Math.max(2_000_000L, STEP_NANOS * FAST_BACKLOG / backlog)
+                ? Math.max(4_000_000L, STEP_NANOS * FAST_BACKLOG / backlog)
                 : STEP_NANOS;
 
-        boolean advanced = false;
-        while (!pending.isEmpty() && now - lastStep >= interval) {
-            visual = pending.pollFirst();
-            lastStep += interval;
-            advanced = true;
-        }
-        if (pending.isEmpty() && !advanced) {
-            reset(); // the final slot was already shown: vanilla now draws the real slot (same one)
-            return;
+        long now = System.nanoTime();
+        if (visual == -1 || now - lastStep >= interval) {
+            visual = pending.pollFirst(); // exactly one entry per step, never skipped
+            lastStep = now;
         }
 
         Inventory inventory = mc.player.getInventory();
