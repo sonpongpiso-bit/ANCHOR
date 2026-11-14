@@ -43,7 +43,7 @@ public final class CrystalModule extends Module {
 
     // ---- config ----
     private long obsidianCooldownMs = 500;
-    private int actionDelayTicks = 2;    // gap between crystal actions (break / place), 2 = 100 ms
+    private int actionDelayTicks = 1;    // gap between crystal actions (break / place), 2 = 100 ms
     private boolean swingHand = true;
     private boolean hotbarAnimation = true;
 
@@ -56,7 +56,7 @@ public final class CrystalModule extends Module {
     private int lastActionTick = -100;   // last crystal break or place
     private int lastAttackedId = -1;
     private int lastAttackTick = -100;
-    private int placeSeenTicks = 2;      // measured delay between placing a crystal and seeing it (adaptive)
+    private int placeSeenTicks = 1;      // measured delay between placing a crystal and seeing it (adaptive)
     private int pendingPlaceTick = -1;
     // Deliberately NOT reset on release/target change: the cooldown only measures real obsidian attempts.
     private long lastObsidianNanos = System.nanoTime() - 3_600_000_000_000L;
@@ -182,7 +182,7 @@ public final class CrystalModule extends Module {
         // 1) Break: only when the crosshair is actually on the crystal sitting on our obsidian.
         if (actionReady && entityHit != null && entityHit.getEntity() instanceof EndCrystal aimed
                 && aimed.blockPosition().equals(above)) {
-            boolean stale = aimed.getId() == lastAttackedId && tickCounter - lastAttackTick < actionDelayTicks;
+            boolean stale = aimed.getId() == lastAttackedId && tickCounter - lastAttackTick < 2;
             if (!stale) {
                 mc.gameMode.attack(player, aimed);
                 if (swingHand) player.swing(InteractionHand.MAIN_HAND);
