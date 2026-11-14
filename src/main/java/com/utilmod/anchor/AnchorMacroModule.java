@@ -43,8 +43,8 @@ public final class AnchorMacroModule extends Module {
     private int detonateSlot = 8;           // hotbar index (config value 9 = index 8)
     private boolean hotbarAnimation = true; // visual-only display of every real slot switch
     private boolean swingHand = true;       // vanilla sends an arm swing per successful interaction
-    private int placeToChargeTicks = 1;     // ticks between placing and charging (1 = 50 ms)
-    private int chargeToDetonateTicks = 1;  // ticks between charging and detonating
+    private int placeToChargeTicks = 2;     // ticks between placing and charging (1 = 50 ms)
+    private int chargeToDetonateTicks = 2;  // ticks between charging and detonating
 
     // ---- state ----
     private boolean triggered;              // a sequence was started during this right-click hold
